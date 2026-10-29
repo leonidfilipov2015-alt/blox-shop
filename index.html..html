@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Blox Shop</title>
+<style>
+body {
+  margin: 0;
+  padding: 20px;
+  background: #101522;
+  color: white;
+  font-family: Arial, sans-serif;
+}
+h1 { color: #60e6ff; text-align: center; }
+h2 { color: #ffd166; }
+button {
+  width: 100%;
+  padding: 14px;
+  margin: 7px 0;
+  border: 0;
+  border-radius: 12px;
+  background: #263650;
+  color: white;
+  font-size: 16px;
+}
+.item {
+  background: #1c2638;
+  padding: 14px;
+  margin: 10px 0;
+  border-radius: 12px;
+}
+.price { color: #69f0ae; }
+a { color: #60e6ff; }
+</style>
+</head>
+<body>
+
+<h1>🔥 Blox Shop</h1>
+<p style="text-align:center">
+Фрукты Blox Fruits и брейнроты Steal a Brainrot
+</p>
+
+<h2>🍎 Фрукты Blox Fruits</h2>
+
+<div id="fruits"></div>
+
+<h2>🧠 Брейнроты Steal a Brainrot</h2>
+
+<div id="brains"></div>
+
+<h2>📢 Наши каналы</h2>
+<div class="item">
+<a href="https://t.me/jkhhkhg">Канал 1</a><br><br>
+<a href="https://t.me/+lcdr_xqvSuMyN2Vi">Канал 2</a><br><br>
+<a href="https://t.me/+Js8Fu1TfXMExNzc6">Канал 3</a>
+</div>
+
+<script>
+const fruits = [
+  {name: "Лайтинг", price: 25},
+  {name: "Шадоу", price: 10},
+  {name: "Мамонт", price: 15},
+  {name: "Портал", price: 15}
+];
+
+const brains = [
+  {name: "Брейнрот №1", price: 0},
+  {name: "Брейнрот №2", price: 0}
+];
+
+function showItems(items, elementId) {
+  const container = document.getElementById(elementId);
+
+  items.forEach(item => {
+    const card = document.createElement("div");
+    card.className = "item";
+
+    const name = document.createElement("b");
+    name.textContent = item.name;
+
+    const price = document.createElement("p");
+    price.className = "price";
+    price.textContent = item.price === 0
+      ? "Цена: уточнить у продавца"
+      : "Цена: " + item.price + " Robux";
+
+    const button = document.createElement("button");
+    button.textContent = "💬 Купить";
+
+    button.onclick = () => {
+      const message = encodeURIComponent(
+        "Здравствуйте! Хочу купить: " + item.name
+      );
+      window.location.href =
+        "https://t.me/Legendjhhbot?start=" + message;
+    };
+
+    card.append(name, price, button);
+    container.appendChild(card);
+  });
+}
+
+showItems(fruits, "fruits");
+showItems(brains, "brains");
+</script>
+
+</body>
+</html>
