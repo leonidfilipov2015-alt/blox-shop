@@ -150,12 +150,13 @@
 
     // Изменяй товары и цены здесь.
     const products = [
-      { category: "blox", name: "Lightning", emoji: "⚡", price: "25 за 1 шт" },
-      { category: "blox", name: "Shadow", emoji: "🌑", price: "5" },
-      { category: "blox", name: "Mammoth", emoji: "🦣", price: "10 за 1 шт" },
-      { category: "blox", name: "Portal", emoji: "🌀", price: "15" },
+      { category: "blox", name: "Lightning", emoji: "⚡", price: "25 рб за 1 шт" },
+      { category: "blox", name: "Shadow", emoji: "🌑", price: "5 рб за 1 шт" },
+      { category: "blox", name: "Mammoth", emoji: "🦣", price: "10 рб за 1 шт" },
+      { category: "blox", name: "Portal", emoji: "🌀", price: "15 рб за 1 шт" },
 
-      { category: "brainrot", name: "4 брейнрота", emoji: "🧠", price: "15 рб" },
+      { category: "brainrot", name: "Брейнрот №1", emoji: "🧠", price: "Уточнить цену" },
+      { category: "brainrot", name: "", emoji: "👾", price: "" }
     ];
 
     let currentCategory = "blox";
@@ -191,7 +192,7 @@
               ". Цена: " + product.price;
 
             const url =
-              "https://t.me/" + Legendjhnb +
+              "https://t.me/" + SELLER_USERNAME +
               "?text=" + encodeURIComponent(message);
 
             if (window.Telegram && window.Telegram.WebApp) {
