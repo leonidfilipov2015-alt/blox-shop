@@ -1,9 +1,10 @@
+
 <!DOCTYPE html>
 <html lang="ru">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport"
-        content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101827">
   <title>Blox Shop</title>
 
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
@@ -20,6 +21,7 @@
     }
 
     h1 { text-align: center; margin-bottom: 5px; }
+
     .subtitle {
       text-align: center;
       color: var(--tg-theme-hint-color, #aab5c8);
@@ -54,11 +56,12 @@
 
     #catalog {
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 12px;
     }
 
     .product {
+      min-width: 0;
       padding: 14px;
       border-radius: 16px;
       background: var(--tg-theme-secondary-bg-color, #202d42);
@@ -120,17 +123,17 @@
   <div class="channels">
     <h3>📢 Наши Telegram-каналы</h3>
 
-    <a class="channel"
-       href="https://t.me/jkhhkhg"
-       target="_blank">Канал 1</a>
+    <a class="channel" href="https://t.me/jkhhkhg" target="_blank" rel="noopener">
+      Канал 1
+    </a>
 
-    <a class="channel"
-       href="https://t.me/+lcdr_xqvSuMyN2Vi"
-       target="_blank">Канал 2</a>
+    <a class="channel" href="https://t.me/+lcdr_xqvSuMyN2Vi" target="_blank" rel="noopener">
+      Канал 2
+    </a>
 
-    <a class="channel"
-       href="https://t.me/+Js8Fu1TfXMExNzc6"
-       target="_blank">Канал 3</a>
+    <a class="channel" href="https://t.me/+Js8Fu1TfXMExNzc6" target="_blank" rel="noopener">
+      Канал 3
+    </a>
   </div>
 
   <div class="note">
@@ -142,24 +145,18 @@
     tg.ready();
     tg.expand();
 
-    // Впиши username продавца без символа @.
+    // Твой Telegram username, без символа @.
     const SELLER_USERNAME = "Legendjhnb";
 
-    // Меняй названия и цены здесь.
+    // Изменяй товары и цены здесь.
     const products = [
-      {category: "blox", name: "Lightning",
-       emoji: "⚡", price: "Уточнить цену"},
-      {category: "blox", name: "Shadow",
-       emoji: "🌑", price: "Уточнить цену"},
-      {category: "blox", name: "Mammoth",
-       emoji: "🦣", price: "Уточнить цену"},
-      {category: "blox", name: "Portal",
-       emoji: "🌀", price: "Уточнить цену"},
+      { category: "blox", name: "Lightning", emoji: "⚡", price: "Уточнить цену" },
+      { category: "blox", name: "Shadow", emoji: "🌑", price: "Уточнить цену" },
+      { category: "blox", name: "Mammoth", emoji: "🦣", price: "Уточнить цену" },
+      { category: "blox", name: "Portal", emoji: "🌀", price: "Уточнить цену" },
 
-      {category: "brainrot", name: "Брейнрот №1",
-       emoji: "🧠", price: "Уточнить цену"},
-      {category: "brainrot", name: "Брейнрот №2",
-       emoji: "👾", price: "Уточнить цену"}
+      { category: "brainrot", name: "Брейнрот №1", emoji: "🧠", price: "Уточнить цену" },
+      { category: "brainrot", name: "Брейнрот №2", emoji: "👾", price: "Уточнить цену" }
     ];
 
     let currentCategory = "blox";
@@ -169,55 +166,57 @@
       catalog.innerHTML = "";
 
       products
-        .filter(p => p.category === currentCategory)
-        .forEach(p => {
+        .filter(product => product.category === currentCategory)
+        .forEach(product => {
           const card = document.createElement("div");
           card.className = "product";
-      const emoji = document.createElement("div");
+
+          const emoji = document.createElement("div");
           emoji.className = "emoji";
-          emoji.textContent = p.emoji;
+          emoji.textContent = product.emoji;
 
           const title = document.createElement("h3");
-          title.textContent = p.name;
+          title.textContent = product.name;
+
           const price = document.createElement("div");
           price.className = "price";
-          price.textContent = p.price;
+          price.textContent = product.price;
 
-          const button = document.createElement("button");
-          button.className = "order";
-          button.textContent = "🛒 Заказать";
+          const orderButton = document.createElement("button");
+          orderButton.className = "order";
+          orderButton.textContent = "🛒 Заказать";
 
-          button.onclick = () => {
-            if (SELLER_USERNAME === "Legendjhnb") {
-              alert("Сначала укажи username продавца в index.html.");
-              return;
-            }
-
+          orderButton.onclick = () => {
             const message =
-              "Здравствуйте! Хочу заказать: " + p.name +
-              ". Цена: " + p.price;
+              "Здравствуйте! Хочу заказать: " + product.name +
+              ". Цена: " + product.price;
 
-            tg.openTelegramLink(
-              "https://t.me/" +  +
-              "?text=" + encodeURIComponent(message)
-            );
+            const url =
+              "https://t.me/" + SELLER_USERNAME +
+              "?text=" + encodeURIComponent(message);
+
+            if (window.Telegram && window.Telegram.WebApp) {
+              tg.openTelegramLink(url);
+            } else {
+              window.open(url, "_blank", "noopener");
+            }
           };
 
-          card.append(emoji, title, price, button);
+          card.append(emoji, title, price, orderButton);
           catalog.appendChild(card);
         });
     }
 
     document.querySelectorAll(".tab").forEach(button => {
-      button.onclick = () => {
+      button.addEventListener("click", () => {
         currentCategory = button.dataset.category;
 
-        document.querySelectorAll(".tab").forEach(tab =>
-          tab.classList.toggle("active", tab === button)
-        );
+        document.querySelectorAll(".tab").forEach(tab => {
+          tab.classList.toggle("active", tab === button);
+        });
 
         renderCatalog();
-      };
+      });
     });
 
     renderCatalog();
