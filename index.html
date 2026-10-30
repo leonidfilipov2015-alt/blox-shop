@@ -175,16 +175,28 @@ function showProducts(category, button) {
     });
 }
 
+
 function buyProduct(name) {
-    const message = encodeURIComponent(
-        "Здравствуйте! Хочу купить: " + name
-    );
+    const productsIds = {
+        "Лайтинг": "lighting",
+        "Шадоу": "shadow",
+        "Мамонт": "mammoth",
+        "Портал": "portal",
+        "Тесто": "dough",
+        "Газ": "gas",
+        "Брейнрот 1": "brainrot1",
+        "Брейнрот 2": "brainrot2",
+        "Брейнрот 3": "brainrot3"
+    };
+
+    const productId = productsIds[name];
 
     window.open(
-        "https://t.me/Legendjhnb?text=" + message,
+        "https://t.me/BloxShopLegend_bot?start=buy_" + productId,
         "_blank"
     );
 }
+
 
 showProducts("blox", document.querySelector("nav button"));
 </script>
