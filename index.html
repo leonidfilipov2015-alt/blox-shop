@@ -2,6 +2,7 @@
 <!DOCTYPE html>
 <html lang="ru">
 <head>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Blox Shop</title>
@@ -132,7 +133,18 @@ footer {
 </footer>
 
 <script>
-const products = {
+const tg = window.Telegram.WebApp;
+tg.ready();
+tg.expand();
+
+const API_URL = "https://bloxshop-backend.onrender.com";
+const tg = window.Telegram.WebApp;
+tg.ready();
+tg.expand();
+
+const API_URL = "https://bloxshop-backend.onrender.com";
+
+let products = {
     blox: [
         {name: "Лайтинг", price: "25 Robux", emoji: "⚡"},
         {name: "Шадоу", price: "10 Robux", emoji: "🌑"},
@@ -141,7 +153,6 @@ const products = {
         {name: "Тесто", price: "Уточнить", emoji: "🍩"},
         {name: "Газ", price: "Уточнить", emoji: "☁️"}
     ],
-
     brainrot: [
         {name: "Брейнрот 1", price: "Уточнить", emoji: "🧠"},
         {name: "Брейнрот 2", price: "Уточнить", emoji: "🐸"},
@@ -149,7 +160,29 @@ const products = {
     ]
 };
 
+};
+
 function showProducts(category, button) {
+async function loadProducts() {
+    try {
+        const response = await fetch(API_URL + "/api/products");
+        if (!response.ok) throw new Error("Ошибка загрузки");
+
+        const data = await response.json();
+
+        if (data.length > 0) {
+            products = {
+                blox: data.filter(p => p.category === "blox"),
+                brainrot: data.filter(p => p.category === "brainrot")
+            };
+        }
+
+        const activeButton = document.querySelector("nav button.active");
+        showProducts("blox", activeButton);
+    } catch (error) {
+        console.error("Не удалось загрузить товары:", error);
+    }
+}
     const container = document.getElementById("products");
 
     container.innerHTML = "";
@@ -175,7 +208,6 @@ function showProducts(category, button) {
     });
 }
 
-
 function buyProduct(name) {
     const productsIds = {
         "Лайтинг": "lighting",
@@ -196,9 +228,7 @@ function buyProduct(name) {
         "_blank"
     );
 }
-
-
-showProducts("blox", document.querySelector("nav button"));
+loadProducts();
 </script>
 
 </body>
