@@ -122,6 +122,10 @@ footer {
     <button onclick="showProducts('brainrot', this)">
         🧠 Brainrot
     </button>
+
+    <button id="adminButton" onclick="showAdminPanel()">
+        ⚙️ Админ-панель
+    </button>
 </nav>
 
 <div class="products" id="products"></div>
@@ -133,12 +137,14 @@ footer {
 </footer>
 
 <script>
-const tg = window.Telegram.WebApp;
-tg.ready();
-tg.expand();
+const tg = window.Telegram?.WebApp;
+
+if (tg) {
+    tg.ready();
+    tg.expand();
+}
 
 const API_URL = "https://bloxshop-backend.onrender.com";
-const tg = window.Telegram.WebApp;
 tg.ready();
 tg.expand();
 
@@ -161,9 +167,6 @@ let products = {
 };
 
 };
-
-function showProducts(category, button) {
-async function loadProducts() {
     try {
         const response = await fetch(API_URL + "/api/products");
         if (!response.ok) throw new Error("Ошибка загрузки");
@@ -183,6 +186,7 @@ async function loadProducts() {
         console.error("Не удалось загрузить товары:", error);
     }
 }
+function showProducts(category, button) {
     const container = document.getElementById("products");
 
     container.innerHTML = "";
@@ -227,6 +231,66 @@ function buyProduct(name) {
         "https://t.me/BloxShopLegend_bot?start=buy_" + productId,
         "_blank"
     );
+}
+function showAdminPanel() {
+    const container = document.getElementById("products");
+
+    container.innerHTML = `
+        <h2>⚙️ Админ-панель</h2>
+
+        <input id="productName" placeholder="Название товара">
+        <input id="productPrice" placeholder="Цена">
+        <input id="productEmoji" placeholder="Эмодзи (например 🍎)">
+
+        <select id="productCategory">
+            <option value="blox">Blox Fruits</option>
+            <option value="brainrot">Brainrot</option>
+        </select>
+
+        <button onclick="addProduct()">➕ Добавить товар</button>
+    `;
+}
+
+async function addProduct() {
+    const name = document.getElementById("productName").value.trim();
+    const price = document.getElementById("productPrice").value.trim();
+    const emoji = document.getElementById("productEmoji").value.trim() || "🎁";
+    const category = document.getElementById("productCategory").value;
+
+    if (!name || !price) {
+        alert("Заполни название и цену!");
+        return;
+    }
+
+    if (!tg || !tg.initData) {
+        alert("Открой магазин через Telegram!");
+        return;
+    }
+
+    try {
+        const response = await fetch(API_URL + "/api/products", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "X-Telegram-Init-Data": tg.initData
+            },
+            body: JSON.stringify({ name, price, emoji, category })
+        });
+
+        const result = await response.json();
+
+        if (!response.ok) {
+            alert(result.error || "Нет доступа");
+            return;
+        }
+
+        alert("Товар добавлен!");
+        await loadProducts();
+
+    } catch (error) {
+        alert("Ошибка соединения с сервером");
+        console.error(error);
+    }
 }
 loadProducts();
 </script>
