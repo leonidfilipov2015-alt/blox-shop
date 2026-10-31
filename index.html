@@ -9,26 +9,40 @@
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 
 <style>
-* { box-sizing: border-box; }
+* {
+    box-sizing: border-box;
+}
 
 body {
     margin: 0;
     padding: 16px;
-    background: #10101c;
+    background:
+        radial-gradient(ellipse at top, #29205a 0%, transparent 50%),
+        #090912;
     color: white;
     font-family: Arial, sans-serif;
 }
 
 .header {
     text-align: center;
-    padding: 20px 10px;
-    background: linear-gradient(135deg,#342080,#111b42);
-    border-radius: 20px;
-    margin-bottom: 20px;
+    padding: 28px 15px;
+    background: linear-gradient(135deg, #713cff, #24104d, #11152e);
+    border: 1px solid #7955ff;
+    border-radius: 22px;
+    margin-bottom: 22px;
+    box-shadow: 0 8px 35px #713cff35;
 }
 
-.header h1 { margin: 5px; font-size: 30px; }
-.header p { color: #c9c9dc; }
+.header h1 {
+    margin: 5px;
+    font-size: 32px;
+    letter-spacing: 2px;
+    text-shadow: 0 0 15px #b89aff;
+}
+
+.header p {
+    color: #ded5ff;
+}
 
 .tabs {
     display: flex;
@@ -41,54 +55,112 @@ button {
     border: none;
     color: white;
     font-weight: bold;
+    transition: 0.2s;
+}
+
+button:active {
+    transform: scale(0.96);
 }
 
 .tab {
     flex: 1;
-    padding: 14px 5px;
-    background: #24243a;
-    border-radius: 12px;
+    padding: 15px 5px;
+    background: #1c1b30;
+    border: 1px solid #393454;
+    border-radius: 13px;
 }
 
-.tab.active { background: #713cff; }
+.tab.active {
+    background: linear-gradient(135deg, #8955ff, #5425cf);
+    border-color: #a78aff;
+    box-shadow: 0 0 18px #713cff55;
+}
+.search-box {
+    margin-bottom: 16px;
+}
+
+.search-box input {
+    width: 100%;
+    padding: 15px;
+    border-radius: 13px;
+    border: 1px solid #7955ff;
+    background: #171529;
+    color: white;
+    font-size: 16px;
+    outline: none;
+    box-shadow: 0 0 15px #713cff22;
+}
+
+.search-box input:focus {
+    border-color: #b89aff;
+    box-shadow: 0 0 15px #713cff66;
+}
+
+.search-box input::placeholder {
+    color: #aaa;
+}
 
 .products {
     display: grid;
-    grid-template-columns: repeat(2,minmax(0,1fr));
-    gap: 12px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 13px;
 }
 
 .product {
-    background: #202035;
-    border: 1px solid #343450;
-    border-radius: 16px;
-    padding: 14px 10px;
+    background: linear-gradient(160deg, #25243d, #151522);
+    border: 1px solid #40375f;
+    border-radius: 19px;
+    padding: 12px 10px;
     text-align: center;
     min-width: 0;
+    box-shadow: 0 5px 20px #0005;
+    transition: 0.2s;
 }
 
-.emoji { font-size: 45px; margin: 8px; }
+.product:active {
+    transform: scale(0.98);
+}
+
+.emoji {
+    font-size: 52px;
+    margin: 12px;
+    filter: drop-shadow(0 0 10px #8955ff);
+}
+
 .product-image {
     width: 100%;
-    height: 150px;
+    height: 155px;
     object-fit: contain;
-    border-radius: 12px;
+    border-radius: 13px;
     margin: 4px 0 10px;
-    background: #151525;
+    background: #11111e;
 }
-.product h3 { font-size: 16px; overflow-wrap: anywhere; }
+
+.product h3 {
+    font-size: 16px;
+    overflow-wrap: anywhere;
+    min-height: 36px;
+}
 
 .price {
-    color: #b99aff;
+    color: #c3a4ff;
+    font-size: 16px;
     font-weight: bold;
-    margin: 12px 0;
+    margin: 13px 0;
+    text-shadow: 0 0 10px #8955ff55;
 }
 
 .buy, .admin-button {
     width: 100%;
-    padding: 12px;
-    background: linear-gradient(135deg,#7545ff,#4922c9);
-    border-radius: 10px;
+    padding: 13px 8px;
+    background: linear-gradient(135deg, #914fff, #5425d5);
+    border: 1px solid #a17aff;
+    border-radius: 12px;
+    box-shadow: 0 4px 15px #713cff40;
+}
+
+.buy:active, .admin-button:active {
+    background: #5425d5;
 }
 
 .status {
@@ -99,24 +171,34 @@ button {
 }
 
 .admin {
-    margin-top: 25px;
-    padding: 16px;
-    background: #202035;
-    border: 1px solid #7545ff;
-    border-radius: 16px;
+    margin-top: 26px;
+    padding: 17px;
+    background: linear-gradient(145deg, #24213d, #151522);
+    border: 1px solid #8955ff;
+    border-radius: 19px;
+    box-shadow: 0 0 25px #713cff25;
 }
 
-.admin h2 { text-align: center; }
+.admin h2 {
+    text-align: center;
+    color: #c9adff;
+}
 
 .admin input, .admin select {
     display: block;
     width: 100%;
-    padding: 13px;
-    margin: 10px 0;
-    border-radius: 9px;
-    border: 1px solid #444;
-    background: #141424;
+    padding: 14px;
+    margin: 11px 0;
+    border-radius: 11px;
+    border: 1px solid #494064;
+    background: #11111e;
     color: white;
+    outline: none;
+}
+
+.admin input:focus, .admin select:focus {
+    border-color: #8955ff;
+    box-shadow: 0 0 10px #713cff44;
 }
 
 .admin-actions {
@@ -124,27 +206,53 @@ button {
     gap: 8px;
 }
 
-.admin-actions button { flex: 1; }
+.admin-actions button {
+    flex: 1;
+}
 
-.secondary { background: #45455c !important; }
+.secondary {
+    background: #45455c !important;
+}
 
 .edit, .delete {
     width: 100%;
-    padding: 9px;
-    margin-top: 7px;
-    border-radius: 8px;
+    padding: 10px;
+    margin-top: 8px;
+    border-radius: 9px;
 }
 
-.edit { background: #4545a0; }
-.delete { background: #a83248; }
+.edit {
+    background: #4545a0;
+}
 
-.hidden { display: none !important; }
+.delete {
+    background: #a83248;
+}
+
+.hidden {
+    display: none !important;
+}
 
 footer {
     text-align: center;
     color: #777;
     margin-top: 30px;
+    padding: 15px;
     font-size: 12px;
+}
+
+@media (max-width: 350px) {
+    .products {
+        gap: 8px;
+    }
+
+    .product {
+        padding: 9px 6px;
+    }
+
+    .product-image {
+        height: 120px;
+    }
 }
 </style>
 </head>
@@ -163,6 +271,22 @@ footer {
 
     <button class="tab" id="brainrotTab"
         onclick="showProducts('brainrot')">🧠 Brainrot</button>
+</div>
+
+<div class="search-box">
+    <input
+        type="text"
+        id="searchInput"
+        placeholder="🔎 Найти товар..."
+        oninput="showProducts(currentCategory)"
+    >
+
+    <button
+        onclick="clearSearch()"
+        style="width:100%; margin-top:8px; padding:10px;
+        background:#292344; border-radius:10px;">
+        ❌ Очистить поиск
+    </button>
 </div>
 
 <div class="products" id="products">
@@ -272,15 +396,20 @@ function showProducts(category) {
     const container = document.getElementById("products");
     container.innerHTML = "";
 
-    const filtered = allProducts.filter(
-        product => product.category === category
-    );
+   const searchInput = document.getElementById("searchInput");
+const searchText = searchInput.value.trim().toLowerCase();
 
-    if (filtered.length === 0) {
-        container.innerHTML =
-            '<div class="status">📦 В этой категории пока нет товаров.</div>';
-        return;
-    }
+const filtered = allProducts.filter(product =>
+    product.category === category &&
+    product.name.toLowerCase().includes(searchText)
+);
+
+   if (filtered.length === 0) {
+    container.innerHTML = searchText
+        ? '<div class="status">🔎 Товар не найден. Попробуй другое название!</div>'
+        : '<div class="status">📦 В этой категории пока нет товаров.</div>';
+    return;
+}
 
     filtered.forEach(product => {
         const card = document.createElement("div");
@@ -512,6 +641,10 @@ async function deleteProduct(product) {
 }
 
 loadProducts();
+function clearSearch() {
+    document.getElementById("searchInput").value = "";
+    showProducts(currentCategory);
+}
 </script>
 
 </body>
