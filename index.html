@@ -1,1365 +1,1080 @@
-import os
-import io
-import re
-import hmac
-import json
-import time
-import hashlib
-import secrets
-import mimetypes
-import urllib.request
-import urllib.parse
-from decimal import Decimal, InvalidOperation
-from datetime import datetime, timezone
-from functools import wraps
-
-import psycopg
-from psycopg.rows import dict_row
-from flask import Flask, jsonify, request, send_file
-
-app = Flask(__name__)
-
-DATABASE_URL = os.environ.get("DATABASE_URL")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "7580041056"))
-
-ALLOWED_CATEGORIES = ("blox", "brainrot", "help", "reviews")
-
-
-def connect_db():
-    if not DATABASE_URL:
-        raise RuntimeError("Не задана переменная DATABASE_URL в Render")
-
-    return psycopg.connect(
-        DATABASE_URL,
-        row_factory=dict_row,
-        connect_timeout=10
-    )
-
-
-def init_db():
-    db = connect_db()
-
-    try:
-        db.execute("""
-            CREATE TABLE IF NOT EXISTS products (
-                id BIGSERIAL PRIMARY KEY,
-                name TEXT NOT NULL,
-                price TEXT NOT NULL,
-                emoji TEXT,
-                category TEXT,
-                image_file_id TEXT,
-                description TEXT
-            )
-        """)
-
-        db.execute("""
-            ALTER TABLE products
-            ADD COLUMN IF NOT EXISTS image_file_id TEXT
-        """)
-
-        db.execute("""
-            ALTER TABLE products
-            ADD COLUMN IF NOT EXISTS description TEXT
-        """)
-
-        db.execute("""
-            CREATE TABLE IF NOT EXISTS promocodes (
-                id BIGSERIAL PRIMARY KEY,
-                code TEXT NOT NULL UNIQUE,
-                discount_percent INTEGER NOT NULL,
-                max_uses INTEGER,
-                used_count INTEGER NOT NULL DEFAULT 0,
-                expires_at TIMESTAMPTZ,
-                active BOOLEAN NOT NULL DEFAULT TRUE,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )
-        """)
-
-        # Таблица розыгрышей
-        db.execute("""
-            CREATE TABLE IF NOT EXISTS giveaways (
-                id BIGSERIAL PRIMARY KEY,
-                title TEXT NOT NULL,
-                prize TEXT NOT NULL,
-                description TEXT NOT NULL DEFAULT '',
-                creator_telegram_id BIGINT NOT NULL,
-                creator_name TEXT NOT NULL,
-                ends_at TIMESTAMPTZ NOT NULL,
-                status TEXT NOT NULL DEFAULT 'active',
-                winner_telegram_id BIGINT,
-                winner_name TEXT,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )
-        """)
-
-        # Участники розыгрышей
-        db.execute("""
-            CREATE TABLE IF NOT EXISTS giveaway_participants (
-                id BIGSERIAL PRIMARY KEY,
-                giveaway_id BIGINT NOT NULL
-                    REFERENCES giveaways(id) ON DELETE CASCADE,
-                telegram_id BIGINT NOT NULL,
-                display_name TEXT NOT NULL,
-                joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                UNIQUE(giveaway_id, telegram_id)
-            )
-        """)
-
-        starter_products = [
-            ("Lightning", "25 Robux", "⚡", "blox"),
-            ("Shadow", "10 Robux", "🌑", "blox"),
-            ("Mammoth", "15 Robux", "🐘", "blox"),
-            ("Portal", "15 Robux", "🌀", "blox"),
-        ]
-
-        for name, price, emoji, category in starter_products:
-            exists = db.execute("""
-                SELECT id FROM products
-                WHERE lower(name) = lower(%s)
-                AND category = %s
-                LIMIT 1
-            """, (name, category)).fetchone()
-
-            if not exists:
-                db.execute("""
-                    INSERT INTO products
-                    (name, price, emoji, category)
-                    VALUES (%s, %s, %s, %s)
-                """, (name, price, emoji, category))
 
-        db.commit()
-
-    except Exception:
-        db.rollback()
-        raise
-    finally:
-        db.close()
-
-
-def check_telegram_admin():
-    bot_token = os.environ.get("BOT_TOKEN")
-    init_data = request.headers.get("X-Telegram-Init-Data", "")
-
-    if not bot_token or not init_data:
-        return False
-
-    try:
-        parsed = dict(
-            urllib.parse.parse_qsl(
-                init_data,
-                keep_blank_values=True
-            )
-        )
-
-        received_hash = parsed.pop("hash", None)
-
-        if not received_hash:
-            return False
-
-        data_check_string = "\n".join(
-            f"{key}={value}"
-            for key, value in sorted(parsed.items())
-        )
-
-        secret_key = hmac.new(
-            b"WebAppData",
-            bot_token.encode(),
-            hashlib.sha256
-        ).digest()
-
-        calculated_hash = hmac.new(
-            secret_key,
-            data_check_string.encode(),
-            hashlib.sha256
-        ).hexdigest()
-
-        if not hmac.compare_digest(calculated_hash, received_hash):
-            return False
-
-        auth_date = int(parsed.get("auth_date", "0"))
-        now = time.time()
-
-        if now - auth_date > 86400:
-            return False
-
-        if auth_date > now + 60:
-            return False
-
-        user = json.loads(parsed.get("user", "{}"))
-
-        return int(user.get("id", 0)) == ADMIN_ID
-
-    except Exception:
-        return False
-
-
-def admin_required(function):
-    @wraps(function)
-    def wrapper(*args, **kwargs):
-        if not check_telegram_admin():
-            return jsonify({
-                "success": False,
-                "error": "Нет доступа администратора"
-            }), 403
-
-        return function(*args, **kwargs)
-
-    return wrapper
-
-
-def bot_required(function):
-    @wraps(function)
-    def wrapper(*args, **kwargs):
-        token = os.environ.get("BOT_TOKEN", "")
-        received = request.headers.get("X-Bot-Token", "")
-
-        if not token or not hmac.compare_digest(token, received):
-            return jsonify({
-                "success": False,
-                "error": "Нет доступа бота"
-            }), 403
-
-        return function(*args, **kwargs)
-
-    return wrapper
-
-
-@app.after_request
-def add_cors_headers(response):
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Headers"] = (
-        "Content-Type, X-Telegram-Init-Data, X-Bot-Token"
-    )
-    response.headers["Access-Control-Allow-Methods"] = (
-        "GET, POST, PUT, DELETE, OPTIONS"
-    )
-    return response
-
-
-@app.before_request
-def handle_options():
-    if request.method == "OPTIONS":
-        return "", 204
-
-
-@app.route("/")
-def home():
-    return "Blox Shop backend работает с Neon!"
-
-
-# -------------------------
-# ТОВАРЫ
-# -------------------------
-
-@app.route("/api/products", methods=["GET"])
-def get_products():
-    db = connect_db()
-
-    try:
-        rows = db.execute(
-            "SELECT * FROM products ORDER BY id DESC"
-        ).fetchall()
-
-        products = []
-
-        for row in rows:
-            product = dict(row)
-            image_file_id = product.pop("image_file_id", None)
-
-            if image_file_id:
-                product["image_url"] = (
-                    request.host_url.rstrip("/")
-                    + f"/api/products/{product['id']}/image"
-                )
-
-            products.append(product)
-
-        return jsonify(products)
-
-    finally:
-        db.close()
-
-
-@app.route("/api/products/<int:product_id>/image", methods=["GET"])
-def product_image(product_id):
-    bot_token = os.environ.get("BOT_TOKEN")
-
-    if not bot_token:
-        return jsonify({"error": "BOT_TOKEN не настроен"}), 500
-
-    db = connect_db()
-
-    try:
-        row = db.execute(
-            "SELECT image_file_id FROM products WHERE id = %s",
-            (product_id,)
-        ).fetchone()
-    finally:
-        db.close()
-
-    if not row or not row["image_file_id"]:
-        return jsonify({"error": "Фотография не найдена"}), 404
-
-    try:
-        file_id = row["image_file_id"]
-
-        get_file_url = (
-            f"https://api.telegram.org/bot{bot_token}/getFile?"
-            + urllib.parse.urlencode({"file_id": file_id})
-        )
-
-        with urllib.request.urlopen(
-            get_file_url,
-            timeout=20
-        ) as response:
-            file_data = json.loads(response.read().decode("utf-8"))
-
-        if not file_data.get("ok"):
-            return jsonify({"error": "Telegram не нашёл фотографию"}), 404
-
-        file_path = file_data["result"]["file_path"]
-
-        image_url = (
-            f"https://api.telegram.org/file/bot{bot_token}/{file_path}"
-        )
-
-        with urllib.request.urlopen(
-            image_url,
-            timeout=30
-        ) as response:
-            image_bytes = response.read()
-            content_type = response.headers.get("Content-Type")
-
-        if not content_type or not content_type.startswith("image/"):
-            content_type = (
-                mimetypes.guess_type(file_path)[0] or "image/jpeg"
-            )
-
-        return send_file(
-            io.BytesIO(image_bytes),
-            mimetype=content_type,
-            max_age=3600
-        )
-
-    except Exception as error:
-        print("Ошибка получения фотографии:", error)
-
-        return jsonify({
-            "error": "Не удалось загрузить фотографию"
-        }), 502
-
-
-def validate_product_data(data):
-    name = str(data.get("name", "")).strip()
-    price = str(data.get("price", "")).strip()
-    emoji = str(data.get("emoji", "🎁")).strip() or "🎁"
-    category = str(data.get("category", "blox")).strip()
-    description = str(data.get("description", "")).strip()
-
-    image_file_id = data.get("image_file_id")
-
-    if image_file_id is not None:
-        image_file_id = str(image_file_id).strip() or None
-
-    if not name:
-        return None, "Укажи название"
-
-    if not price and category != "reviews":
-        return None, "Укажи цену"
-
-    if not price:
-        price = "Отзыв"
-
-    if category not in ALLOWED_CATEGORIES:
-        return None, "Неверная категория"
-
-    return {
-        "name": name,
-        "price": price,
-        "emoji": emoji,
-        "category": category,
-        "description": description,
-        "image_file_id": image_file_id
-    }, None
-
-
-@app.route("/api/products", methods=["POST"])
-@admin_required
-def add_product():
-    data = request.get_json(silent=True) or {}
-
-    product, error = validate_product_data(data)
-
-    if error:
-        return jsonify({
-            "success": False,
-            "error": error
-        }), 400
-
-    db = connect_db()
-
-    try:
-        row = db.execute("""
-            INSERT INTO products
-            (name, price, emoji, category, image_file_id, description)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            RETURNING id
-        """, (
-            product["name"],
-            product["price"],
-            product["emoji"],
-            product["category"],
-            product["image_file_id"],
-            product["description"]
-        )).fetchone()
-
-        db.commit()
-
-        return jsonify({
-            "success": True,
-            "id": row["id"]
-        })
-
-    except Exception:
-        db.rollback()
-        raise
-
-    finally:
-        db.close()
-
-
-@app.route("/api/products/<int:product_id>", methods=["PUT"])
-@admin_required
-def update_product(product_id):
-    data = request.get_json(silent=True) or {}
-
-    product, error = validate_product_data(data)
-
-    if error:
-        return jsonify({
-            "success": False,
-            "error": error
-        }), 400
-
-    db = connect_db()
-
-    try:
-        if "image_file_id" in data:
-            db.execute("""
-                UPDATE products
-                SET name = %s,
-                    price = %s,
-                    emoji = %s,
-                    category = %s,
-                    description = %s,
-                    image_file_id = %s
-                WHERE id = %s
-            """, (
-                product["name"],
-                product["price"],
-                product["emoji"],
-                product["category"],
-                product["description"],
-                product["image_file_id"],
-                product_id
-            ))
-        else:
-            db.execute("""
-                UPDATE products
-                SET name = %s,
-                    price = %s,
-                    emoji = %s,
-                    category = %s,
-                    description = %s
-                WHERE id = %s
-            """, (
-                product["name"],
-                product["price"],
-                product["emoji"],
-                product["category"],
-                product["description"],
-                product_id
-            ))
-
-        db.commit()
-
-        return jsonify({"success": True})
-
-    except Exception:
-        db.rollback()
-        raise
-
-    finally:
-        db.close()
-
-
-@app.route("/api/products/<int:product_id>", methods=["DELETE"])
-@admin_required
-def delete_product(product_id):
-    db = connect_db()
-
-    try:
-        db.execute(
-            "DELETE FROM products WHERE id = %s",
-            (product_id,)
-        )
-
-        db.commit()
-
-        return jsonify({"success": True})
-
-    except Exception:
-        db.rollback()
-        raise
-
-    finally:
-        db.close()
-
-
-# -------------------------
-# ПРОМОКОДЫ
-# -------------------------
-
-def normalize_code(value):
-    return re.sub(r"\s+", "", str(value or "")).upper()
-
-
-def promo_to_dict(row):
-    promo = dict(row)
-
-    if promo.get("expires_at"):
-        promo["expires_at"] = promo["expires_at"].isoformat()
-
-    if promo.get("created_at"):
-        promo["created_at"] = promo["created_at"].isoformat()
-
-    return promo
-
-
-def validate_promo_data(data):
-    code = normalize_code(data.get("code"))
-
-    try:
-        discount = int(data.get("discount_percent"))
-    except (TypeError, ValueError):
-        return None, "Скидка должна быть числом"
-
-    if not re.fullmatch(r"[A-Z0-9_-]{3,32}", code):
-        return None, "Код: от 3 до 32 символов, только латиница и цифры"
-
-    if not 1 <= discount <= 100:
-        return None, "Скидка должна быть от 1 до 100%"
-
-    max_uses = data.get("max_uses")
-
-    if max_uses in ("", None):
-        max_uses = None
-    else:
-        try:
-            max_uses = int(max_uses)
-            if max_uses < 1:
-                return None, "Лимит использований должен быть больше 0"
-        except (TypeError, ValueError):
-            return None, "Неверный лимит использований"
-
-    expires_at = data.get("expires_at") or None
-
-    if expires_at:
-        try:
-            expires_at = datetime.fromisoformat(
-                str(expires_at).replace("Z", "+00:00")
-            )
-
-            if expires_at.tzinfo is None:
-                expires_at = expires_at.replace(tzinfo=timezone.utc)
-
-        except ValueError:
-            return None, "Неверная дата окончания"
-
-    active = data.get("active", True)
-
-    if not isinstance(active, bool):
-        active = str(active).lower() in ("true", "1", "yes")
-
-    return {
-        "code": code,
-        "discount_percent": discount,
-        "max_uses": max_uses,
-        "expires_at": expires_at,
-        "active": active
-    }, None
-
-
-@app.route("/api/promocodes", methods=["GET"])
-@admin_required
-def get_promocodes():
-    db = connect_db()
-
-    try:
-        rows = db.execute("""
-            SELECT * FROM promocodes
-            ORDER BY id DESC
-        """).fetchall()
-
-        return jsonify([promo_to_dict(row) for row in rows])
-
-    finally:
-        db.close()
-
-
-@app.route("/api/promocodes", methods=["POST"])
-@admin_required
-def add_promocode():
-    data = request.get_json(silent=True) or {}
-    promo, error = validate_promo_data(data)
-
-    if error:
-        return jsonify({
-            "success": False,
-            "error": error
-        }), 400
-
-    db = connect_db()
-
-    try:
-        row = db.execute("""
-            INSERT INTO promocodes
-            (code, discount_percent, max_uses, expires_at, active)
-            VALUES (%s, %s, %s, %s, %s)
-            RETURNING id
-        """, (
-            promo["code"],
-            promo["discount_percent"],
-            promo["max_uses"],
-            promo["expires_at"],
-            promo["active"]
-        )).fetchone()
-
-        db.commit()
-
-        return jsonify({
-            "success": True,
-            "id": row["id"]
-        })
-
-    except psycopg.errors.UniqueViolation:
-        db.rollback()
-        return jsonify({
-            "success": False,
-            "error": "Такой промокод уже существует"
-        }), 409
-
-    except Exception:
-        db.rollback()
-        raise
-
-    finally:
-        db.close()
-
-
-@app.route("/api/promocodes/<int:promo_id>", methods=["PUT"])
-@admin_required
-def update_promocode(promo_id):
-    data = request.get_json(silent=True) or {}
-    promo, error = validate_promo_data(data)
-
-    if error:
-        return jsonify({
-            "success": False,
-            "error": error
-        }), 400
-
-    db = connect_db()
-
-    try:
-        row = db.execute("""
-            UPDATE promocodes
-            SET code = %s,
-                discount_percent = %s,
-                max_uses = %s,
-                expires_at = %s,
-                active = %s
-            WHERE id = %s
-            RETURNING id
-        """, (
-            promo["code"],
-            promo["discount_percent"],
-            promo["max_uses"],
-            promo["expires_at"],
-            promo["active"],
-            promo_id
-        )).fetchone()
-
-        db.commit()
-
-        if not row:
-            return jsonify({
-                "success": False,
-                "error": "Промокод не найден"
-            }), 404
-
-        return jsonify({"success": True})
-
-    except psycopg.errors.UniqueViolation:
-        db.rollback()
-        return jsonify({
-            "success": False,
-            "error": "Такой промокод уже существует"
-        }), 409
-
-    except Exception:
-        db.rollback()
-        raise
-
-    finally:
-        db.close()
-
-
-@app.route("/api/promocodes/<int:promo_id>", methods=["DELETE"])
-@admin_required
-def delete_promocode(promo_id):
-    db = connect_db()
-
-    try:
-        db.execute(
-            "DELETE FROM promocodes WHERE id = %s",
-            (promo_id,)
-        )
-
-        db.commit()
-
-        return jsonify({"success": True})
-
-    except Exception:
-        db.rollback()
-        raise
-
-    finally:
-        db.close()
-
-
-def calculate_discount(price, discount_percent):
-    """
-    Скидка применяется только к ценам вида:
-    15 Robux, 100, 25.50 Robux.
-    """
-
-    price = str(price or "").strip()
-
-    match = re.match(
-        r"^\s*(\d+(?:[.,]\d{1,2})?)\s*(.*?)\s*$",
-        price
-    )
-
-    if not match:
-        return None
-
-    try:
-        original = Decimal(match.group(1).replace(",", "."))
-    except InvalidOperation:
-        return None
-
-    suffix = match.group(2)
-
-    discounted = (
-        original * (Decimal(100 - discount_percent) / Decimal(100))
-    ).quantize(Decimal("0.01"))
-
-    if discounted == discounted.to_integral_value():
-        result_number = str(int(discounted))
-    else:
-        result_number = format(discounted.normalize(), "f")
-
-    return {
-        "original_price": price,
-        "discounted_price": f"{result_number} {suffix}".strip(),
-        "discount_amount": str(original - discounted),
-        "discount_percent": discount_percent
-    }
-
-
-def get_valid_promo(db, code):
-    row = db.execute("""
-        SELECT * FROM promocodes
-        WHERE code = %s
-        FOR UPDATE
-    """, (normalize_code(code),)).fetchone()
-
-    if not row:
-        return None, "Промокод не найден"
-
-    if not row["active"]:
-        return None, "Промокод отключён"
-
-    if row["expires_at"] and row["expires_at"] <= datetime.now(timezone.utc):
-        return None, "Срок действия промокода истёк"
-
-    if row["max_uses"] is not None:
-        if row["used_count"] >= row["max_uses"]:
-            return None, "Промокод больше нельзя использовать"
-
-    return row, None
-
-
-@app.route("/api/promocodes/validate", methods=["POST"])
-def validate_promocode():
-    data = request.get_json(silent=True) or {}
-
-    code = normalize_code(data.get("code"))
-
-    try:
-        product_id = int(data.get("product_id"))
-    except (TypeError, ValueError):
-        return jsonify({
-            "success": False,
-            "error": "Не указан товар"
-        }), 400
-
-    db = connect_db()
-
-    try:
-        promo = db.execute("""
-            SELECT * FROM promocodes
-            WHERE code = %s
-        """, (code,)).fetchone()
-
-        if not promo:
-            return jsonify({
-                "success": False,
-                "error": "Промокод не найден"
-            }), 404
-
-        if not promo["active"]:
-            return jsonify({
-                "success": False,
-                "error": "Промокод отключён"
-            }), 400
-
-        if promo["expires_at"] and promo["expires_at"] <= datetime.now(timezone.utc):
-            return jsonify({
-                "success": False,
-                "error": "Срок действия промокода истёк"
-            }), 400
-
-        if promo["max_uses"] is not None and promo["used_count"] >= promo["max_uses"]:
-            return jsonify({
-                "success": False,
-                "error": "Лимит использований исчерпан"
-            }), 400
-
-        product = db.execute("""
-            SELECT id, name, price
-            FROM products
-            WHERE id = %s
-        """, (product_id,)).fetchone()
-
-        if not product:
-            return jsonify({
-                "success": False,
-                "error": "Товар не найден"
-            }), 404
-
-        result = calculate_discount(
-            product["price"],
-            promo["discount_percent"]
-        )
-
-        if result is None:
-            return jsonify({
-                "success": False,
-                "error": "На этот товар скидка не распространяется"
-            }), 400
-
-        return jsonify({
-            "success": True,
-            "code": promo["code"],
-            "product_id": product["id"],
-            "product_name": product["name"],
-            **result
-        })
-
-    finally:
-        db.close()
-
-
-@app.route("/api/promocodes/redeem", methods=["POST"])
-@bot_required
-def redeem_promocode():
-    data = request.get_json(silent=True) or {}
-
-    try:
-        product_id = int(data.get("product_id"))
-    except (TypeError, ValueError):
-        return jsonify({
-            "success": False,
-            "error": "Не указан товар"
-        }), 400
-
-    code = normalize_code(data.get("code"))
-
-    if not code:
-        return jsonify({
-            "success": False,
-            "error": "Не указан промокод"
-        }), 400
-
-    db = connect_db()
-
-    try:
-        promo, error = get_valid_promo(db, code)
-
-        if error:
-            db.rollback()
-            return jsonify({
-                "success": False,
-                "error": error
-            }), 400
-
-        product = db.execute("""
-            SELECT id, name, price
-            FROM products
-            WHERE id = %s
-        """, (product_id,)).fetchone()
-
-        if not product:
-            db.rollback()
-            return jsonify({
-                "success": False,
-                "error": "Товар не найден"
-            }), 404
-
-        result = calculate_discount(
-            product["price"],
-            promo["discount_percent"]
-        )
-
-        if result is None:
-            db.rollback()
-            return jsonify({
-                "success": False,
-                "error": "На этот товар скидка не распространяется"
-            }), 400
-
-        db.execute("""
-            UPDATE promocodes
-            SET used_count = used_count + 1
-            WHERE id = %s
-        """, (promo["id"],))
-
-        db.commit()
-
-        return jsonify({
-            "success": True,
-            "code": promo["code"],
-            "product_id": product["id"],
-            "product_name": product["name"],
-            **result
-        })
-
-    except Exception:
-        db.rollback()
-        raise
-
-    finally:
-        db.close()
-
-
-# -------------------------
-# РОЗЫГРЫШИ
-# -------------------------
-
-def get_telegram_user():
-    """Проверяет Telegram WebApp initData."""
-    bot_token = os.environ.get("BOT_TOKEN", "")
-    init_data = request.headers.get("X-Telegram-Init-Data", "")
-
-    if not bot_token or not init_data:
-        return None
-
-    try:
-        parsed = dict(
-            urllib.parse.parse_qsl(
-                init_data,
-                keep_blank_values=True
-            )
-        )
-
-        received_hash = parsed.pop("hash", None)
-
-        if not received_hash:
-            return None
-
-        data_check_string = "\n".join(
-            f"{key}={value}"
-            for key, value in sorted(parsed.items())
-        )
-
-        secret_key = hmac.new(
-            b"WebAppData",
-            bot_token.encode(),
-            hashlib.sha256
-        ).digest()
-
-        calculated_hash = hmac.new(
-            secret_key,
-            data_check_string.encode(),
-            hashlib.sha256
-        ).hexdigest()
-
-        if not hmac.compare_digest(calculated_hash, received_hash):
-            return None
-
-        auth_date = int(parsed.get("auth_date", "0"))
-        now = time.time()
-
-        if now - auth_date > 86400 or auth_date > now + 60:
-            return None
-
-        user = json.loads(parsed.get("user", "{}"))
-        telegram_id = int(user.get("id", 0))
-
-        if not telegram_id:
-            return None
-
-        first_name = str(user.get("first_name", "")).strip()
-        last_name = str(user.get("last_name", "")).strip()
-        username = str(user.get("username", "")).strip()
-
-        display_name = " ".join(
-            x for x in (first_name, last_name) if x
-        )
-
-        if not display_name:
-            display_name = (
-                "@" + username if username
-                else f"Игрок {telegram_id}"
-            )
-
-        return {
-            "id": telegram_id,
-            "name": display_name[:100]
-        }
-
-    except Exception:
-        return None
-
-
-def giveaway_to_dict(row, current_user_id=None):
-    item = dict(row)
-
-    if item.get("ends_at"):
-        item["ends_at"] = item["ends_at"].isoformat()
-
-    if item.get("created_at"):
-        item["created_at"] = item["created_at"].isoformat()
-
-    item["participants_count"] = int(
-        item.get("participants_count") or 0
-    )
-
-    item["is_creator"] = (
-        current_user_id is not None
-        and int(item["creator_telegram_id"]) == int(current_user_id)
-    )
-
-    item["is_participant"] = bool(
-        current_user_id is not None
-        and item.get("is_participant")
-    )
-
-    return item
-
-
-# Получение всех розыгрышей
-@app.route("/api/giveaways", methods=["GET"])
-def get_giveaways():
-    current_user = get_telegram_user()
-    current_user_id = current_user["id"] if current_user else None
-
-    db = connect_db()
-
-    try:
-        rows = db.execute("""
-            SELECT g.*,
-                   COUNT(p.id)::INTEGER AS participants_count,
-                   COALESCE(
-                       BOOL_OR(p.telegram_id = %s),
-                       FALSE
-                   ) AS is_participant
-            FROM giveaways g
-            LEFT JOIN giveaway_participants p
-                ON p.giveaway_id = g.id
-            GROUP BY g.id
-            ORDER BY
-                CASE WHEN g.status = 'active' THEN 0 ELSE 1 END,
-                g.created_at DESC
-        """, (current_user_id or -1,)).fetchall()
-
-        return jsonify([
-            giveaway_to_dict(row, current_user_id)
-            for row in rows
-        ])
-
-    finally:
-        db.close()
-
-
-# Создание розыгрыша
-@app.route("/api/giveaways", methods=["POST"])
-def create_giveaway():
-    user = get_telegram_user()
-
-    if not user:
-        return jsonify({
-            "success": False,
-            "error": "Открой магазин через Telegram, чтобы создать розыгрыш"
-        }), 401
-
-    data = request.get_json(silent=True) or {}
-
-    title = str(data.get("title", "")).strip()
-    prize = str(data.get("prize", "")).strip()
-    description = str(data.get("description", "")).strip()
-    ends_value = data.get("ends_at")
-
-    if not title or len(title) > 80:
-        return jsonify({
-            "success": False,
-            "error": "Название: от 1 до 80 символов"
-        }), 400
-
-    if not prize or len(prize) > 120:
-        return jsonify({
-            "success": False,
-            "error": "Приз: от 1 до 120 символов"
-        }), 400
-
-    if len(description) > 500:
-        return jsonify({
-            "success": False,
-            "error": "Описание — максимум 500 символов"
-        }), 400
-
-    try:
-        ends_at = datetime.fromisoformat(
-            str(ends_value).replace("Z", "+00:00")
-        )
-
-        if ends_at.tzinfo is None:
-            ends_at = ends_at.replace(tzinfo=timezone.utc)
-
-        ends_at = ends_at.astimezone(timezone.utc)
-
-    except (TypeError, ValueError):
-        return jsonify({
-            "success": False,
-            "error": "Укажи дату окончания розыгрыша"
-        }), 400
-
-    now = datetime.now(timezone.utc)
-
-    if ends_at <= now:
-        return jsonify({
-            "success": False,
-            "error": "Дата окончания должна быть в будущем"
-        }), 400
-
-    if ends_at > now.replace(year=now.year + 1):
-        return jsonify({
-            "success": False,
-            "error": "Нельзя создавать розыгрыш дольше чем на год"
-        }), 400
-
-    db = connect_db()
-
-    try:
-        row = db.execute("""
-            INSERT INTO giveaways (
-                title,
-                prize,
-                description,
-                creator_telegram_id,
-                creator_name,
-                ends_at
-            )
-            VALUES (%s, %s, %s, %s, %s, %s)
-            RETURNING id
-        """, (
-            title,
-            prize,
-            description,
-            user["id"],
-            user["name"],
-            ends_at
-        )).fetchone()
-
-        db.commit()
-
-        return jsonify({
-            "success": True,
-            "id": row["id"]
-        })
-
-    except Exception:
-        db.rollback()
-        raise
-
-    finally:
-        db.close()
-
-
-# Присоединение к розыгрышу
-@app.route("/api/giveaways/<int:giveaway_id>/join", methods=["POST"])
-def join_giveaway(giveaway_id):
-    user = get_telegram_user()
-
-    if not user:
-        return jsonify({
-            "success": False,
-            "error": "Открой магазин через Telegram, чтобы участвовать"
-        }), 401
-
-    db = connect_db()
-
-    try:
-        giveaway = db.execute("""
-            SELECT id, ends_at, status
-            FROM giveaways
-            WHERE id = %s
-            FOR UPDATE
-        """, (giveaway_id,)).fetchone()
-
-        if not giveaway:
-            return jsonify({
-                "success": False,
-                "error": "Розыгрыш не найден"
-            }), 404
-
-        if (
-            giveaway["status"] != "active"
-            or giveaway["ends_at"] <= datetime.now(timezone.utc)
-        ):
-            return jsonify({
-                "success": False,
-                "error": "Этот розыгрыш уже завершён"
-            }), 400
-
-        db.execute("""
-            INSERT INTO giveaway_participants (
-                giveaway_id,
-                telegram_id,
-                display_name
-            )
-            VALUES (%s, %s, %s)
-            ON CONFLICT (giveaway_id, telegram_id) DO NOTHING
-        """, (
-            giveaway_id,
-            user["id"],
-            user["name"]
-        ))
-
-        db.commit()
-
-        return jsonify({
-            "success": True,
-            "message": "Ты участвуешь!"
-        })
-
-    except Exception:
-        db.rollback()
-        raise
-
-    finally:
-        db.close()
-
-
-# Выбор победителя создателем после окончания
-@app.route("/api/giveaways/<int:giveaway_id>/draw", methods=["POST"])
-def draw_giveaway(giveaway_id):
-    user = get_telegram_user()
-
-    if not user:
-        return jsonify({
-            "success": False,
-            "error": "Нужна авторизация Telegram"
-        }), 401
-
-    db = connect_db()
-
-    try:
-        giveaway = db.execute("""
-            SELECT *
-            FROM giveaways
-            WHERE id = %s
-            FOR UPDATE
-        """, (giveaway_id,)).fetchone()
-
-        if not giveaway:
-            return jsonify({
-                "success": False,
-                "error": "Розыгрыш не найден"
-            }), 404
-
-        if int(giveaway["creator_telegram_id"]) != user["id"]:
-            return jsonify({
-                "success": False,
-                "error": "Завершить розыгрыш может только создатель"
-            }), 403
-
-        if giveaway["status"] != "active":
-            return jsonify({
-                "success": False,
-                "error": "Розыгрыш уже завершён"
-            }), 400
-
-        if giveaway["ends_at"] > datetime.now(timezone.utc):
-            return jsonify({
-                "success": False,
-                "error": "Дождись даты окончания розыгрыша"
-            }), 400
-
-        participants = db.execute("""
-            SELECT telegram_id, display_name
-            FROM giveaway_participants
-            WHERE giveaway_id = %s
-        """, (giveaway_id,)).fetchall()
-
-        winner = secrets.choice(participants) if participants else None
-
-        db.execute("""
-            UPDATE giveaways
-            SET status = 'completed',
-                winner_telegram_id = %s,
-                winner_name = %s
-            WHERE id = %s
-        """, (
-            winner["telegram_id"] if winner else None,
-            winner["display_name"] if winner else None,
-            giveaway_id
-        ))
-
-        db.commit()
-
-        return jsonify({
-            "success": True,
-            "winner_name": winner["display_name"] if winner else None,
-            "winner_telegram_id": winner["telegram_id"] if winner else None
-        })
-
-    except Exception:
-        db.rollback()
-        raise
-
-    finally:
-        db.close()
-
-
-init_db()
-
-
-if __name__ == "__main__":
-    app.run(
-        host="0.0.0.0",
-        port=int(os.environ.get("PORT", 5000)),
-        debug=False
-    )
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#10101c">
+<title>Blox Shop</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+
+<style>
+*{box-sizing:border-box}
+body{margin:0;padding:16px;background:radial-gradient(ellipse at top,#29205a 0%,transparent 50%),#090912;color:white;font-family:Arial,sans-serif}
+.header{text-align:center;padding:28px 15px;background:linear-gradient(135deg,#713cff,#24104d,#11152e);border:1px solid #7955ff;border-radius:22px;margin-bottom:22px;box-shadow:0 8px 35px #713cff35}
+.header h1{margin:5px;font-size:32px;letter-spacing:2px;text-shadow:0 0 15px #b89aff}
+.header p{color:#ded5ff}
+.tabs{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap}
+.tab{flex:1;min-width:28%;padding:13px 4px;background:#1c1b30;border:1px solid #393454;border-radius:13px;font-size:13px}
+button{cursor:pointer;border:none;color:white;font-weight:bold;transition:.2s}
+button:active{transform:scale(.97)}
+button:disabled{opacity:.5;cursor:not-allowed}
+.tab.active{background:linear-gradient(135deg,#8955ff,#5425cf);border-color:#a78aff;box-shadow:0 0 18px #713cff55}
+.admin-toggle{display:block;width:100%;padding:13px;margin:0 0 18px;border-radius:12px;border:1px solid #a17aff;background:linear-gradient(135deg,#39305e,#211a3b);box-shadow:0 4px 15px #713cff30}
+.admin-toggle.active{background:linear-gradient(135deg,#8955ff,#5425cf)}
+.search-box{margin-bottom:16px}
+.search-box input{width:100%;padding:15px;border-radius:13px;border:1px solid #7955ff;background:#171529;color:white;font-size:16px;outline:none}
+.search-box input::placeholder{color:#aaa}
+.clear-search{width:100%;margin-top:8px;padding:10px;background:#292344;border-radius:10px}
+.products{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:13px}
+.product{background:linear-gradient(160deg,#25243d,#151522);border:1px solid #40375f;border-radius:19px;padding:12px 10px;text-align:center;min-width:0;box-shadow:0 5px 20px #0005}
+.emoji{font-size:52px;margin:12px;filter:drop-shadow(0 0 10px #8955ff)}
+.product-image{width:100%;height:155px;object-fit:contain;border-radius:13px;margin:4px 0 10px;background:#11111e}
+.product h3{font-size:16px;overflow-wrap:anywhere;min-height:36px}
+.price{color:#c3a4ff;font-size:16px;font-weight:bold;margin:13px 0}
+.buy,.admin-button,.details{width:100%;padding:13px 8px;background:linear-gradient(135deg,#914fff,#5425d5);border:1px solid #a17aff;border-radius:12px;box-shadow:0 4px 15px #713cff40}
+.details{margin-bottom:8px;background:linear-gradient(135deg,#494078,#30234e)}
+.status{text-align:center;color:#aaa;padding:30px 10px;grid-column:1/-1}
+.admin{margin-top:22px;margin-bottom:22px;padding:17px;background:linear-gradient(145deg,#24213d,#151522);border:1px solid #8955ff;border-radius:19px;box-shadow:0 0 25px #713cff25}
+.admin h2{text-align:center;color:#c9adff;margin-top:4px}
+.admin h3{color:#d7c5ff;margin-top:25px}
+.admin-description{text-align:center;color:#aaa;font-size:14px}
+.admin input,.admin select,.admin textarea{display:block;width:100%;padding:14px;margin:11px 0;border-radius:11px;border:1px solid #494064;background:#11111e;color:white;outline:none;font:inherit}
+.admin textarea{min-height:100px;resize:vertical}
+.admin-actions{display:flex;gap:8px}
+.admin-actions button{flex:1}
+.secondary{background:#45455c!important}
+.edit,.delete{width:100%;padding:10px;margin-top:8px;border-radius:9px}
+.edit{background:#4545a0}.delete{background:#a83248}
+.hidden{display:none!important}
+.help-subtabs{display:flex;gap:8px;margin:0 0 14px}
+.help-subtabs button{flex:1;padding:11px 5px;border-radius:11px;background:#201d35;border:1px solid #494064}
+.help-subtabs button.active{background:#6b3bd4;border-color:#a17aff}
+.contact-box{margin-top:18px;padding:16px;text-align:center;background:#1b1830;border:1px solid #494064;border-radius:15px;color:#ddd}
+.contact-box a{color:#c3a4ff;text-decoration:none;font-weight:bold}
+.modal{position:fixed;inset:0;background:#000b;display:flex;align-items:center;justify-content:center;padding:18px;z-index:10}
+.modal-card{width:100%;max-width:440px;max-height:85vh;overflow:auto;background:linear-gradient(160deg,#292544,#12121f);border:1px solid #8955ff;border-radius:20px;padding:20px;box-shadow:0 10px 40px #0009}
+.modal-card h2{text-align:center;color:#d7c5ff}
+.modal-description{white-space:pre-wrap;line-height:1.5;color:#eee}
+.modal-actions{display:flex;gap:9px;margin-top:18px}
+.modal-actions button{flex:1}
+.close{background:#45455c;border-radius:11px;padding:13px}
+.promo-box{margin-top:16px;padding:14px;background:#171529;border:1px solid #494064;border-radius:13px}
+.promo-box label{display:block;color:#d7c5ff;margin-bottom:8px;font-weight:bold}
+.promo-row{display:flex;gap:7px}
+.promo-row input{min-width:0;flex:1;padding:12px;border-radius:10px;border:1px solid #7955ff;background:#11111e;color:white;font-size:15px}
+.promo-row button{padding:10px 13px;border-radius:10px;background:#6735d1}
+.promo-message{font-size:13px;margin-top:10px;min-height:17px;color:#aaa}
+.promo-success{color:#72e6a1}.promo-error{color:#ff8585}
+.discount-total{margin-top:13px;padding:12px;border-radius:10px;background:#211b38;text-align:center;line-height:1.7}
+.old-price{text-decoration:line-through;color:#999}
+.new-price{font-size:21px;color:#83efa9;font-weight:bold}
+.promo-item{padding:13px;margin-top:10px;background:#171529;border:1px solid #494064;border-radius:12px;overflow-wrap:anywhere}
+.promo-item strong{color:#d7c5ff;font-size:17px}
+.promo-item small{display:block;color:#aaa;margin-top:6px;line-height:1.5}
+.promo-item button{margin-top:9px;padding:9px;border-radius:8px;width:48%}
+.promo-item .edit{background:#4545a0}
+.promo-item .delete{background:#a83248}
+.promo-active{color:#72e6a1}.promo-inactive{color:#ff8585}
+
+/* Счётчик количества */
+.quantity-box{display:flex;align-items:center;justify-content:center;gap:15px;margin:14px 0;padding:10px;background:#171529;border:1px solid #494064;border-radius:13px}
+.quantity-box button{width:38px;height:38px;border-radius:10px;background:linear-gradient(135deg,#8955ff,#5425cf);font-size:22px}
+.quantity-number{font-size:19px;font-weight:bold;min-width:28px;text-align:center}
+.quantity-label{font-size:13px;color:#aaa;margin-top:12px}
+.purchase-info{color:#bbb;font-size:13px;text-align:center;margin-top:8px}
+
+footer{text-align:center;color:#777;margin-top:30px;padding:15px;font-size:12px}
+
+@media(max-width:380px){
+ body{padding:11px}
+ .tabs{gap:5px}
+ .tab{font-size:11px;padding:12px 2px;min-width:28%}
+ .products{gap:8px}
+ .product{padding:9px 6px}
+ .product-image{height:120px}
+ .header h1{font-size:27px}
+ .promo-row{flex-direction:column}
+ .promo-row button{width:100%}
+}
+</style>
+</head>
+
+<body>
+
+<div class="header">
+ <h1>🔥 BLOX SHOP</h1>
+ <p>Магазин Blox Fruits и Steal a Brainrot</p>
+ <p>🛒 Лучшие товары по хорошим ценам!</p>
+</div>
+
+<div class="tabs">
+ <button class="tab active" id="bloxTab" onclick="showProducts('blox')">🍎 Blox Fruits</button>
+ <button class="tab" id="brainrotTab" onclick="showProducts('brainrot')">🧠 Brainrot</button>
+ <button class="tab" id="accountsTab" onclick="showProducts('accounts')">👤 Аккаунты</button>
+ <button class="tab" id="helpTab" onclick="showProducts('help')">🛠 Помощь по БФ</button>
+</div>
+
+<button class="admin-toggle hidden" id="adminToggle" onclick="toggleAdminPanel()">⚙️ Открыть админку</button>
+
+<div class="search-box">
+ <input type="text" id="searchInput" placeholder="🔎 Найти товар или услугу..." oninput="showProducts(currentCategory)">
+ <button class="clear-search" onclick="clearSearch()">❌ Очистить поиск</button>
+</div>
+
+<div id="helpSubtabs" class="help-subtabs hidden">
+ <button id="servicesTab" class="active" onclick="showHelpSection('help')">🛠 Услуги</button>
+ <button id="reviewsTab" onclick="showHelpSection('reviews')">⭐ Отзывы</button>
+</div>
+
+<div class="products" id="products">
+ <div class="status">⏳ Загружаем товары...</div>
+</div>
+
+<div class="contact-box hidden" id="helpContacts">
+ <b>💯 Честно · ⚡ Быстро · 🤝 Без обмана</b><br><br>
+ Можем договориться о цене<br>
+ 📩 Пишите в личные сообщения:<br>
+ <a href="https://t.me/Legendjhnb" onclick="openContact(event, 'Legendjhnb')">@Legendjhnb</a>
+ &nbsp;·&nbsp;
+ <a href="https://t.me/Wqbvmp" onclick="openContact(event, 'Wqbvmp')">@Wqbvmp</a>
+</div>
+
+<div class="admin hidden" id="adminPanel">
+ <h2>⚙️ Панель администратора</h2>
+ <p class="admin-description">Управление товарами, аккаунтами, услугами и промокодами</p>
+
+ <h3>📦 Товары и аккаунты</h3>
+ <input id="productName" placeholder="Название товара или аккаунта" maxlength="100">
+ <input id="productPrice" placeholder="Цена (например: 25 Robux)" maxlength="100">
+ <input id="productEmoji" placeholder="Эмодзи, например 🍎" maxlength="10">
+ <input id="productImageFileId" placeholder="Telegram file_id фотографии (необязательно)">
+ <textarea id="productDescription" placeholder="Описание товара или аккаунта"></textarea>
+
+ <select id="productCategory">
+  <option value="blox">Blox Fruits</option>
+  <option value="brainrot">Steal a Brainrot</option>
+  <option value="accounts">Продажа аккаунтов</option>
+  <option value="help">Помощь по БФ — услуги</option>
+  <option value="reviews">Помощь по БФ — отзывы</option>
+ </select>
+
+ <div class="admin-actions">
+  <button class="admin-button" id="saveButton" onclick="saveProduct()">➕ Добавить</button>
+  <button class="admin-button secondary hidden" id="cancelButton" onclick="cancelEdit()">Отмена</button>
+ </div>
+
+ <p id="adminMessage" class="admin-description"></p>
+
+ <hr style="border-color:#494064;margin:25px 0">
+
+ <h3>🎟️ Управление промокодами</h3>
+
+ <input id="promoCode" placeholder="Промокод (например: BLOX10)" maxlength="32">
+ <input id="promoDiscount" type="number" min="1" max="100" placeholder="Скидка в процентах (например: 10)">
+ <input id="promoMaxUses" type="number" min="1" placeholder="Максимум использований (пусто = без лимита)">
+
+ <label style="display:block;color:#c9adff;margin-top:14px">Дата окончания (необязательно)</label>
+ <input id="promoExpires" type="datetime-local">
+
+ <label style="display:flex;align-items:center;gap:9px;color:#ddd;margin:12px 0">
+  <input id="promoActive" type="checkbox" checked style="width:auto;margin:0">
+  Промокод активен
+ </label>
+
+ <div class="admin-actions">
+  <button class="admin-button" id="savePromoButton" onclick="savePromo()">🎟️ Создать промокод</button>
+  <button class="admin-button secondary hidden" id="cancelPromoButton" onclick="cancelPromoEdit()">Отмена</button>
+ </div>
+
+ <p id="promoAdminMessage" class="admin-description"></p>
+
+ <div id="promoList">
+  <div class="status">Промокоды ещё не загружены</div>
+ </div>
+</div>
+
+<!-- Окно описания услуги -->
+<div id="detailsModal" class="modal hidden" onclick="if(event.target===this)closeDetails()">
+ <div class="modal-card">
+  <h2 id="modalTitle"></h2>
+  <div class="price" id="modalPrice"></div>
+  <div class="modal-description" id="modalDescription"></div>
+
+  <div class="modal-actions">
+   <button class="buy" id="modalOrderButton">📩 Заказать</button>
+   <button class="close" onclick="closeDetails()">Закрыть</button>
+  </div>
+ </div>
+</div>
+
+<!-- Окно покупки -->
+<div id="purchaseModal" class="modal hidden" onclick="if(event.target===this)closePurchase()">
+ <div class="modal-card">
+  <h2 id="purchaseTitle">🛒 Покупка</h2>
+  <div class="price" id="purchaseOriginalPrice"></div>
+
+  <div id="quantitySection">
+   <div class="quantity-label">Количество товара</div>
+   <div class="quantity-box">
+    <button type="button" onclick="changeQuantity(-1)">−</button>
+    <span class="quantity-number" id="quantityValue">1</span>
+    <button type="button" onclick="changeQuantity(1)">+</button>
+   </div>
+  </div>
+
+  <div class="purchase-info" id="purchaseInfo"></div>
+
+  <div class="promo-box">
+   <label for="purchasePromoCode">🎟️ Есть промокод?</label>
+
+   <div class="promo-row">
+    <input id="purchasePromoCode" placeholder="Введи промокод" maxlength="32">
+    <button id="applyPromoButton" onclick="applyPromo()">Применить</button>
+   </div>
+
+   <div class="promo-message" id="promoMessage"></div>
+  </div>
+
+  <div class="discount-total" id="purchaseTotal"></div>
+
+  <div class="modal-actions">
+   <button class="buy" id="confirmPurchaseButton" onclick="confirmPurchase()">📩 Заказать</button>
+   <button class="close" onclick="closePurchase()">Закрыть</button>
+  </div>
+ </div>
+</div>
+
+<footer>Blox Shop © 2026</footer>
+
+<script>
+const tg = window.Telegram?.WebApp;
+
+if (tg) {
+ tg.ready();
+ tg.expand();
+ tg.setHeaderColor("#10101c");
+ tg.setBackgroundColor("#10101c");
+}
+
+const API_URL = "https://bloxshop-backend.onrender.com";
+const ADMIN_ID = 7580041056;
+const MAX_QUANTITY = 99;
+
+let allProducts = [];
+let currentCategory = "blox";
+let currentHelpSection = "help";
+let editingProductId = null;
+
+let currentPurchaseProduct = null;
+let appliedPromo = null;
+let currentQuantity = 1;
+let editingPromoId = null;
+let allPromos = [];
+
+const isAdmin = Number(tg?.initDataUnsafe?.user?.id) === ADMIN_ID;
+
+if (isAdmin) {
+ document.getElementById("adminToggle").classList.remove("hidden");
+}
+
+function openContact(event, username) {
+ event.preventDefault();
+ const url = "https://t.me/" + username;
+ if (tg) tg.openTelegramLink(url);
+ else window.open(url, "_blank");
+}
+
+function authHeaders() {
+ return {
+  "Content-Type":"application/json",
+  "X-Telegram-Init-Data":tg?.initData || ""
+ };
+}
+
+function toggleAdminPanel() {
+ if (!isAdmin) return;
+
+ const panel = document.getElementById("adminPanel");
+ const toggle = document.getElementById("adminToggle");
+ const opening = panel.classList.contains("hidden");
+
+ panel.classList.toggle("hidden", !opening);
+ toggle.classList.toggle("active", opening);
+ toggle.textContent = opening ? "✖️ Закрыть админку" : "⚙️ Открыть админку";
+
+ if (opening) {
+  panel.scrollIntoView({behavior:"smooth",block:"start"});
+  loadPromos();
+ } else {
+  cancelEdit();
+  cancelPromoEdit();
+ }
+}
+
+async function loadProducts() {
+ const container = document.getElementById("products");
+ container.innerHTML = '<div class="status">⏳ Загружаем товары...</div>';
+
+ try {
+  const response = await fetch(API_URL + "/api/products");
+  if (!response.ok) throw new Error("Ошибка сервера: " + response.status);
+
+  const data = await response.json();
+  allProducts = Array.isArray(data) ? data : (data.products || []);
+
+  showProducts(currentCategory);
+ } catch(error) {
+  console.error(error);
+  container.innerHTML =
+   '<div class="status">❌ Ошибка загрузки.<br><br><button class="buy" onclick="loadProducts()">🔄 Повторить</button></div>';
+ }
+}
+
+function showProducts(category) {
+ currentCategory = category;
+
+ document.getElementById("bloxTab").classList.toggle("active",category==="blox");
+ document.getElementById("brainrotTab").classList.toggle("active",category==="brainrot");
+ document.getElementById("accountsTab").classList.toggle("active",category==="accounts");
+ document.getElementById("helpTab").classList.toggle("active",category==="help");
+
+ document.getElementById("products").classList.remove("hidden");
+ document.getElementById("helpSubtabs").classList.toggle("hidden",category!=="help");
+ document.getElementById("helpContacts").classList.toggle("hidden",category!=="help");
+
+ if (category==="help") {
+  showHelpSection(currentHelpSection);
+  return;
+ }
+
+ renderCategory(category);
+}
+
+function showHelpSection(section) {
+ currentHelpSection = section;
+
+ document.getElementById("servicesTab").classList.toggle("active",section==="help");
+ document.getElementById("reviewsTab").classList.toggle("active",section==="reviews");
+
+ renderCategory(section);
+}
+
+function renderCategory(category) {
+ const container = document.getElementById("products");
+ container.innerHTML = "";
+
+ const searchText = document.getElementById("searchInput").value.trim().toLowerCase();
+
+ const filtered = allProducts.filter(p =>
+  p.category===category &&
+  (
+   String(p.name||"").toLowerCase().includes(searchText) ||
+   String(p.description||"").toLowerCase().includes(searchText)
+  )
+ );
+
+ if (!filtered.length) {
+  container.innerHTML =
+   '<div class="status">'+(searchText?'🔎 Ничего не найдено.':'📦 Здесь пока пусто. Добавь записи через админку!')+'</div>';
+  return;
+ }
+
+ filtered.forEach(product => {
+  const card = document.createElement("div");
+  card.className = "product";
+
+  let visual;
+
+  if (product.image_url) {
+   visual = document.createElement("img");
+   visual.className = "product-image";
+   visual.src = product.image_url;
+   visual.alt = product.name || "Фото";
+   visual.loading = "lazy";
+
+   visual.onerror = () => {
+    visual.remove();
+    const fallback = document.createElement("div");
+    fallback.className = "emoji";
+    fallback.textContent = product.emoji || "🎁";
+    card.insertBefore(fallback, name);
+   };
+  } else {
+   visual = document.createElement("div");
+   visual.className = "emoji";
+   visual.textContent = product.emoji || "🎁";
+  }
+
+  const name = document.createElement("h3");
+  name.textContent = product.name || "Без названия";
+
+  const price = document.createElement("div");
+  price.className = "price";
+  price.textContent = category==="reviews" ? "⭐ Отзыв" : "💰 " + (product.price || "Уточнить");
+
+  card.append(visual,name,price);
+
+  if (category==="help") {
+   const details = document.createElement("button");
+   details.className = "details";
+   details.textContent = "📖 Подробнее";
+   details.onclick = () => openDetails(product);
+   card.append(details);
+
+  } else if (category==="reviews") {
+   const review = document.createElement("div");
+   review.className = "modal-description";
+   review.textContent = product.description || "";
+   card.append(review);
+
+  } else {
+   const buy = document.createElement("button");
+   buy.className = "buy";
+   buy.textContent = category==="accounts" ? "👤 Купить аккаунт" : "🛒 Купить";
+   buy.onclick = () => openPurchase(product);
+   card.append(buy);
+  }
+
+  if (isAdmin) {
+   const edit = document.createElement("button");
+   edit.className = "edit";
+   edit.textContent = "✏️ Изменить";
+   edit.onclick = () => startEdit(product);
+
+   const remove = document.createElement("button");
+   remove.className = "delete";
+   remove.textContent = "🗑 Удалить";
+   remove.onclick = () => deleteProduct(product);
+
+   card.append(edit,remove);
+  }
+
+  container.appendChild(card);
+ });
+}
+
+function openDetails(product) {
+ document.getElementById("modalTitle").textContent = product.name || "Услуга";
+ document.getElementById("modalPrice").textContent = "💰 " + (product.price || "Уточнить");
+ document.getElementById("modalDescription").textContent =
+  product.description || "Подробности уточняйте у продавца.";
+
+ document.getElementById("modalOrderButton").onclick = () => orderService(product);
+ document.getElementById("detailsModal").classList.remove("hidden");
+}
+
+function closeDetails() {
+ document.getElementById("detailsModal").classList.add("hidden");
+}
+
+function orderService(product) {
+ const message =
+  "Здравствуйте! Хочу заказать услугу: " +
+  product.name +
+  ". Цена: " +
+  (product.price || "уточнить") +
+  ".";
+
+ const url = "https://t.me/Legendjhnb?text=" + encodeURIComponent(message);
+
+ if (tg) tg.openTelegramLink(url);
+ else window.open(url, "_blank");
+}
+
+/* -------------------------
+   ПОКУПКА И КОЛИЧЕСТВО
+------------------------- */
+
+function isAccount(product) {
+ return product?.category === "accounts";
+}
+
+function changeQuantity(change) {
+ if (!currentPurchaseProduct || isAccount(currentPurchaseProduct)) return;
+
+ currentQuantity = Math.max(1,Math.min(MAX_QUANTITY,currentQuantity+change));
+ appliedPromo = null;
+
+ document.getElementById("quantityValue").textContent = currentQuantity;
+ document.getElementById("promoMessage").textContent = "";
+ document.getElementById("promoMessage").className = "promo-message";
+
+ renderPurchaseTotal();
+}
+
+function getPriceParts(price) {
+ const match = String(price || "").trim().match(/^(\d+(?:[.,]\d+)?)(.*)$/);
+
+ if (!match) return null;
+
+ return {
+  amount:Number(match[1].replace(",", ".")),
+  suffix:match[2].trim()
+ };
+}
+
+function formatMoney(value) {
+ return Number(value.toFixed(2)).toString();
+}
+
+function calculateTotal(price,quantity) {
+ const parts = getPriceParts(price);
+ if (!parts || !Number.isFinite(parts.amount)) return null;
+
+ const total = parts.amount * quantity;
+ return formatMoney(total) + (parts.suffix ? " " + parts.suffix : "");
+}
+
+function openPurchase(product) {
+ currentPurchaseProduct = product;
+ appliedPromo = null;
+ currentQuantity = 1;
+
+ const account = isAccount(product);
+
+ document.getElementById("purchaseTitle").textContent =
+  (account ? "👤 Аккаунт: " : "🛒 ") + product.name;
+
+ document.getElementById("purchaseOriginalPrice").textContent =
+  "Цена за 1 шт.: " + (product.price || "Уточнить");
+
+ document.getElementById("quantitySection").classList.toggle("hidden",account);
+ document.getElementById("quantityValue").textContent = "1";
+
+ document.getElementById("purchaseInfo").textContent =
+  account ? "Аккаунты продаются по одной штуке." : "Можно заказать от 1 до " + MAX_QUANTITY + " штук.";
+
+ document.getElementById("purchasePromoCode").value = "";
+ document.getElementById("promoMessage").textContent = "";
+ document.getElementById("promoMessage").className = "promo-message";
+
+ renderPurchaseTotal();
+ document.getElementById("purchaseModal").classList.remove("hidden");
+}
+
+function closePurchase() {
+ document.getElementById("purchaseModal").classList.add("hidden");
+ currentPurchaseProduct = null;
+ appliedPromo = null;
+ currentQuantity = 1;
+}
+
+function renderPurchaseTotal() {
+ const total = document.getElementById("purchaseTotal");
+ if (!currentPurchaseProduct) return;
+
+ const quantity = isAccount(currentPurchaseProduct) ? 1 : currentQuantity;
+ const originalTotal = calculateTotal(currentPurchaseProduct.price,quantity);
+
+ if (appliedPromo) {
+  const oldTotal = appliedPromo.original_total || originalTotal || currentPurchaseProduct.price;
+  const newTotal = appliedPromo.discounted_total || appliedPromo.discounted_price || "Уточнить";
+
+  total.innerHTML =
+   '<div>Количество: <b>' + quantity + '</b></div>' +
+   '<div>Промокод: <b>' + escapeHTML(appliedPromo.code) + '</b></div>' +
+   '<div>Скидка: <b>-' + Number(appliedPromo.discount_percent) + '%</b></div>' +
+   '<div class="old-price">Было: ' + escapeHTML(oldTotal) + '</div>' +
+   '<div class="new-price">Итого: ' + escapeHTML(newTotal) + '</div>';
+ } else {
+  total.textContent = "Итого за " + quantity + " шт.: " +
+   (originalTotal || currentPurchaseProduct.price || "Уточнить");
+ }
+}
+
+async function applyPromo() {
+ if (!currentPurchaseProduct) return;
+
+ const code = document.getElementById("purchasePromoCode").value.trim().toUpperCase();
+ const message = document.getElementById("promoMessage");
+ const button = document.getElementById("applyPromoButton");
+
+ if (!code) {
+  message.textContent = "Введи промокод!";
+  message.className = "promo-message promo-error";
+  return;
+ }
+
+ button.disabled = true;
+ button.textContent = "⏳ Проверка...";
+
+ try {
+  const quantity = isAccount(currentPurchaseProduct) ? 1 : currentQuantity;
+
+  const response = await fetch(API_URL + "/api/promocodes/validate", {
+   method:"POST",
+   headers:{"Content-Type":"application/json"},
+   body:JSON.stringify({
+    code,
+    product_id:currentPurchaseProduct.id,
+    quantity
+   })
+  });
+
+  const result = await response.json();
+
+  if (!response.ok || !result.success) {
+   throw new Error(result.error || "Промокод не подходит");
+  }
+
+  appliedPromo = result;
+  appliedPromo.code = code;
+  appliedPromo.discount_percent = result.discount_percent;
+  renderPurchaseTotal();
+
+  message.textContent = "✅ Промокод применён!";
+  message.className = "promo-message promo-success";
+
+ } catch(error) {
+  appliedPromo = null;
+  renderPurchaseTotal();
+
+  message.textContent = "❌ " + error.message;
+  message.className = "promo-message promo-error";
+
+ } finally {
+  button.disabled = false;
+  button.textContent = "Применить";
+ }
+}
+
+function confirmPurchase() {
+ if (!currentPurchaseProduct) return;
+
+ const productId = Number(currentPurchaseProduct.id);
+
+ if (!Number.isInteger(productId) || productId <= 0) {
+  alert("Не удалось определить товар. Попробуй ещё раз.");
+  return;
+ }
+
+ const quantity = isAccount(currentPurchaseProduct) ? 1 : currentQuantity;
+ const code = appliedPromo ? appliedPromo.code : "";
+
+ let startParameter = "order_" + productId + "_q" + quantity;
+
+ if (code) {
+  startParameter += "_p" + code;
+ }
+
+ if (startParameter.length > 64) {
+  alert("Слишком длинный промокод!");
+  return;
+ }
+
+ const url = "https://t.me/BloxShopLegend_bot?start=" + startParameter;
+
+ if (tg) tg.openTelegramLink(url);
+ else window.open(url, "_blank");
+}
+
+/* -------------------------
+   АДМИНКА ТОВАРОВ
+------------------------- */
+
+async function saveProduct() {
+ if (!isAdmin || !tg?.initData) {
+  alert("Открой магазин через Telegram!");
+  return;
+ }
+
+ const name = document.getElementById("productName").value.trim();
+ let price = document.getElementById("productPrice").value.trim();
+ const emoji = document.getElementById("productEmoji").value.trim();
+ const imageFileId = document.getElementById("productImageFileId").value.trim();
+ const description = document.getElementById("productDescription").value.trim();
+ const category = document.getElementById("productCategory").value;
+
+ if (!name) return alert("Укажи название!");
+ if (category!=="reviews" && !price) return alert("Укажи цену!");
+ if (category==="reviews" && !price) price = "Отзыв";
+
+ const data = {
+  name,
+  price,
+  emoji:emoji || "🎁",
+  category,
+  description
+ };
+
+ if (imageFileId) data.image_file_id = imageFileId;
+
+ const url = editingProductId
+  ? API_URL + "/api/products/" + editingProductId
+  : API_URL + "/api/products";
+
+ const method = editingProductId ? "PUT" : "POST";
+ const button = document.getElementById("saveButton");
+
+ button.disabled = true;
+ button.textContent = "⏳ Сохраняем...";
+
+ try {
+  const response = await fetch(url,{
+   method,
+   headers:authHeaders(),
+   body:JSON.stringify(data)
+  });
+
+  const result = await response.json();
+
+  if (!response.ok || !result.success) {
+   throw new Error(result.error || "Не удалось сохранить");
+  }
+
+  alert(editingProductId ? "✅ Изменения сохранены!" : "✅ Добавлено!");
+
+  cancelEdit();
+  await loadProducts();
+
+ } catch(error) {
+  console.error(error);
+  alert("❌ " + error.message);
+
+ } finally {
+  button.disabled = false;
+  button.textContent = editingProductId ? "💾 Сохранить" : "➕ Добавить";
+ }
+}
+
+function startEdit(product) {
+ if (!isAdmin) return;
+
+ editingProductId = product.id;
+
+ document.getElementById("productName").value = product.name || "";
+ document.getElementById("productPrice").value = product.price || "";
+ document.getElementById("productEmoji").value = product.emoji || "";
+ document.getElementById("productImageFileId").value = "";
+ document.getElementById("productDescription").value = product.description || "";
+ document.getElementById("productCategory").value = product.category || "blox";
+
+ document.getElementById("saveButton").textContent = "💾 Сохранить";
+ document.getElementById("cancelButton").classList.remove("hidden");
+
+ const panel = document.getElementById("adminPanel");
+ if (panel.classList.contains("hidden")) toggleAdminPanel();
+
+ panel.scrollIntoView({behavior:"smooth",block:"start"});
+}
+
+function cancelEdit() {
+ editingProductId = null;
+
+ [
+  "productName",
+  "productPrice",
+  "productEmoji",
+  "productImageFileId",
+  "productDescription"
+ ].forEach(id => document.getElementById(id).value = "");
+
+ document.getElementById("productCategory").value = "blox";
+ document.getElementById("saveButton").textContent = "➕ Добавить";
+ document.getElementById("cancelButton").classList.add("hidden");
+}
+
+async function deleteProduct(product) {
+ if (!isAdmin || !tg?.initData) return;
+ if (!confirm("Удалить «" + product.name + "»?")) return;
+
+ try {
+  const response = await fetch(
+   API_URL + "/api/products/" + product.id,
+   {method:"DELETE",headers:authHeaders()}
+  );
+
+  const result = await response.json();
+
+  if (!response.ok || !result.success) {
+   throw new Error(result.error || "Ошибка удаления");
+  }
+
+  alert("🗑 Удалено!");
+  await loadProducts();
+
+ } catch(error) {
+  alert("❌ " + error.message);
+ }
+}
+
+/* -------------------------
+   АДМИНКА ПРОМОКОДОВ
+------------------------- */
+
+async function loadPromos() {
+ const list = document.getElementById("promoList");
+ list.innerHTML = '<div class="status">⏳ Загружаем промокоды...</div>';
+
+ try {
+  const response = await fetch(API_URL + "/api/promocodes", {
+   headers:authHeaders()
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+   throw new Error(data.error || "Не удалось загрузить промокоды");
+  }
+
+  allPromos = Array.isArray(data) ? data : [];
+  renderPromos();
+
+ } catch(error) {
+  list.innerHTML = '<div class="status">❌ ' + escapeHTML(error.message) + '</div>';
+ }
+}
+
+function renderPromos() {
+ const list = document.getElementById("promoList");
+ list.innerHTML = "";
+
+ if (!allPromos.length) {
+  list.innerHTML = '<div class="status">🎟️ Промокодов пока нет</div>';
+  return;
+ }
+
+ allPromos.forEach(promo => {
+  const item = document.createElement("div");
+  item.className = "promo-item";
+
+  const status = promo.active
+   ? '<span class="promo-active">● Активен</span>'
+   : '<span class="promo-inactive">● Отключён</span>';
+
+  const expiry = promo.expires_at
+   ? new Date(promo.expires_at).toLocaleString("ru-RU")
+   : "Без срока окончания";
+
+  const limit = promo.max_uses === null
+   ? "Без лимита"
+   : promo.used_count + " / " + promo.max_uses;
+
+  const info = document.createElement("div");
+
+  info.innerHTML =
+   '<strong>' + escapeHTML(promo.code) + '</strong>' +
+   '<small>Скидка: ' + promo.discount_percent + '%</small>' +
+   '<small>Использовано: ' + limit + '</small>' +
+   '<small>Окончание: ' + escapeHTML(expiry) + '</small>' +
+   '<small>' + status + '</small>';
+
+  const edit = document.createElement("button");
+  edit.className = "edit";
+  edit.textContent = "✏️ Изменить";
+  edit.onclick = () => startPromoEdit(promo);
+
+  const toggle = document.createElement("button");
+  toggle.className = "edit";
+  toggle.textContent = promo.active ? "⏸ Отключить" : "▶️ Включить";
+  toggle.onclick = () => togglePromo(promo);
+
+  const remove = document.createElement("button");
+  remove.className = "delete";
+  remove.textContent = "🗑 Удалить";
+  remove.onclick = () => deletePromo(promo);
+
+  item.append(info,edit,toggle,remove);
+  list.appendChild(item);
+ });
+}
+
+function escapeHTML(value) {
+ return String(value ?? "").replace(/[&<>"']/g, char => ({
+  "&":"&amp;",
+  "<":"&lt;",
+  ">":"&gt;",
+  '"':"&quot;",
+  "'":"&#039;"
+ }[char]));
+}
+
+function getPromoFormData() {
+ const code = document.getElementById("promoCode").value.trim().toUpperCase();
+ const discount = Number(document.getElementById("promoDiscount").value);
+ const maxValue = document.getElementById("promoMaxUses").value.trim();
+ const expiryValue = document.getElementById("promoExpires").value;
+
+ if (!/^[A-Z0-9_-]{3,32}$/.test(code)) {
+  throw new Error("Код: от 3 до 32 символов, только латиница, цифры, _ и -");
+ }
+
+ if (!Number.isInteger(discount) || discount < 1 || discount > 100) {
+  throw new Error("Скидка должна быть от 1 до 100%");
+ }
+
+ let maxUses = null;
+
+ if (maxValue) {
+  maxUses = Number(maxValue);
+  if (!Number.isInteger(maxUses) || maxUses < 1) {
+   throw new Error("Лимит должен быть целым числом больше 0");
+  }
+ }
+
+ let expiresAt = null;
+ if (expiryValue) expiresAt = new Date(expiryValue).toISOString();
+
+ return {
+  code,
+  discount_percent:discount,
+  max_uses:maxUses,
+  expires_at:expiresAt,
+  active:document.getElementById("promoActive").checked
+ };
+}
+
+async function savePromo() {
+ if (!isAdmin || !tg?.initData) {
+  alert("Открой магазин через Telegram!");
+  return;
+ }
+
+ const button = document.getElementById("savePromoButton");
+ const message = document.getElementById("promoAdminMessage");
+
+ let data;
+
+ try {
+  data = getPromoFormData();
+ } catch(error) {
+  message.textContent = "❌ " + error.message;
+  return;
+ }
+
+ button.disabled = true;
+ button.textContent = "⏳ Сохраняем...";
+
+ try {
+  const url = editingPromoId
+   ? API_URL + "/api/promocodes/" + editingPromoId
+   : API_URL + "/api/promocodes";
+
+  const response = await fetch(url,{
+   method:editingPromoId ? "PUT" : "POST",
+   headers:authHeaders(),
+   body:JSON.stringify(data)
+  });
+
+  const result = await response.json();
+
+  if (!response.ok || !result.success) {
+   throw new Error(result.error || "Ошибка сохранения");
+  }
+
+  message.textContent = editingPromoId
+   ? "✅ Промокод обновлён!"
+   : "✅ Промокод создан!";
+
+  cancelPromoEdit();
+  await loadPromos();
+
+ } catch(error) {
+  message.textContent = "❌ " + error.message;
+
+ } finally {
+  button.disabled = false;
+  button.textContent = editingPromoId ? "💾 Сохранить промокод" : "🎟️ Создать промокод";
+ }
+}
+
+function startPromoEdit(promo) {
+ editingPromoId = promo.id;
+
+ document.getElementById("promoCode").value = promo.code;
+ document.getElementById("promoDiscount").value = promo.discount_percent;
+ document.getElementById("promoMaxUses").value = promo.max_uses ?? "";
+ document.getElementById("promoActive").checked = promo.active;
+
+ if (promo.expires_at) {
+  const date = new Date(promo.expires_at);
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+  document.getElementById("promoExpires").value = local.toISOString().slice(0,16);
+ } else {
+  document.getElementById("promoExpires").value = "";
+ }
+
+ document.getElementById("savePromoButton").textContent = "💾 Сохранить промокод";
+ document.getElementById("cancelPromoButton").classList.remove("hidden");
+
+ document.getElementById("promoCode").scrollIntoView({
+  behavior:"smooth",
+  block:"center"
+ });
+}
+
+function cancelPromoEdit() {
+ editingPromoId = null;
+
+ document.getElementById("promoCode").value = "";
+ document.getElementById("promoDiscount").value = "";
+ document.getElementById("promoMaxUses").value = "";
+ document.getElementById("promoExpires").value = "";
+ document.getElementById("promoActive").checked = true;
+
+ document.getElementById("savePromoButton").textContent = "🎟️ Создать промокод";
+ document.getElementById("cancelPromoButton").classList.add("hidden");
+}
+
+async function togglePromo(promo) {
+ const updated = {
+  code:promo.code,
+  discount_percent:promo.discount_percent,
+  max_uses:promo.max_uses,
+  expires_at:promo.expires_at,
+  active:!promo.active
+ };
+
+ try {
+  const response = await fetch(API_URL + "/api/promocodes/" + promo.id,{
+   method:"PUT",
+   headers:authHeaders(),
+   body:JSON.stringify(updated)
+  });
+
+  const result = await response.json();
+
+  if (!response.ok || !result.success) {
+   throw new Error(result.error || "Не удалось изменить промокод");
+  }
+
+  await loadPromos();
+
+ } catch(error) {
+  alert("❌ " + error.message);
+ }
+}
+
+async function deletePromo(promo) {
+ if (!confirm("Удалить промокод " + promo.code + "?")) return;
+
+ try {
+  const response = await fetch(API_URL + "/api/promocodes/" + promo.id,{
+   method:"DELETE",
+   headers:authHeaders()
+  });
+
+  const result = await response.json();
+
+  if (!response.ok || !result.success) {
+   throw new Error(result.error || "Ошибка удаления");
+  }
+
+  await loadPromos();
+
+ } catch(error) {
+  alert("❌ " + error.message);
+ }
+}
+
+function clearSearch() {
+ document.getElementById("searchInput").value = "";
+ showProducts(currentCategory);
+}
+
+loadProducts();
+</script>
+
+</body>
+</html>
